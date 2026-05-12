@@ -1,0 +1,33 @@
+
+
+1. Get the real domains
+   - Ask customer for prod, staging, localhost domains
+   - Add all to allowedDomains
+
+2. Generate API key + namespace  
+   - apiKey: random string, e.g. acme_7f3k9p
+   - namespace: lowercase, no spaces
+
+3. Review config JSON
+   - protectedRoutes match their pages
+   - vault routes have valid video URLs
+   - webhookUrl points to Railway
+   - timing values make sense
+
+4. Onboard via Postman
+   - POST /admin/onboard-company with JSON
+   - Check response: { "status": "company_onboarded" }
+   - GET /shield/config with x-api-key to verify
+
+5. Verify in admin dashboard
+   - Check /admin/companies for new company
+   - Check backend logs for errors
+
+6. Hand off to customer
+   - API key
+   - Script tag: <script src="https://your-domain.com/shield.js" data-api-key="key"></script>
+   - Dashboard URL
+
+7. Security check
+   - Lock /admin/companies with basic auth
+   - Remove localhost from allowedDomains on prod
