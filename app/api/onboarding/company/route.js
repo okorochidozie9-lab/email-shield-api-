@@ -1,25 +1,17 @@
-import express from 'express';
-import { POST } from './route.js';
+import { NextResponse } from "next/server";
 
-const app = express();
-app.use(express.json());
-
-app.post('/api/onboarding/company', async (req, res) => {
+export async function POST(request) {
   try {
-    const request = new Request(`http://localhost:${process.env.PORT || 3000}/api/onboarding/company`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body)
-    });
-
-    const response = await POST(request);
-    const data = await response.json();
-    res.status(response.status).send(data);
+    const body = await request.json();
+    
+    // Put your logic here instead of calling another route
+    // Example:
+    console.log("Received:", body);
+    
+    return NextResponse.json({ success: true, data: body }, { status: 200 });
+    
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: 'Server error' });
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
