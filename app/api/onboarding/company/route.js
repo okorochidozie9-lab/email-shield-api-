@@ -1,5 +1,5 @@
 import express from 'express';
-import { POST, GET } from './app/api/onboarding/company/route.js';
+import { POST, GET } from './route.js';  // <- fixed this line
 
 const app = express();
 app.use(express.json());
