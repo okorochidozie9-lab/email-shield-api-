@@ -1,25 +1,20 @@
-import { Redis } from '@upstash/redis';
+import express from 'express';
+import { POST, GET } from './app/api/onboarding/company/route.js';
 
-const redis = new Redis({
-  url: process.env.UPSTASH_REDIS_REST_URL,
-  token: process.env.UPSTASH_REDIS_REST_TOKEN,
+const app = express();
+app.use(express.json());
+
+app.post('/api/onboarding/company', async (req, res) => {
+  const response = await POST({ json: async () => req.body });
+  const data = await response.json();
+  res.status(response.status).send(data);
 });
 
-export async function POST(req) {
-  try {
-    const body = await req.json();
-    
-    // Replace this with your actual logic from the old backend
-    const { companyName, email } = body;
-    
-    await redis.set(`company:${email}`, JSON.stringify(body));
-    
-    return Response.json({ success: true, message: "Company onboarded" }, { status: 201 });
-  } catch (error) {
-    return Response.json({ success: false, error: error.message }, { status: 500 });
-  }
-}
+app.get('/api/onboarding/company', async (req, res) => {
+  const response = await GET();
+  const data = await response.json();
+  res.status(response.status).send(data);
+});
 
-export async function GET() {
-  return Response.json({ message: "API is live" });
-}
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
