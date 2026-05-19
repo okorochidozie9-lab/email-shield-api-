@@ -12,7 +12,7 @@ Built for accountants, bookkeepers, and SaaS apps that need accurate data withou
 - Processes files up to 10MB per request
 
 ## Endpoint
-`POST /cleanup`
+`POST /cleanup`  
 Send your file as `form-data` with the key `file`.
 
 ## Example Request
