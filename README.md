@@ -1,23 +1,29 @@
 # Receipt Cleanup API
 
-Convert messy bank statements, receipts, and invoices from PDF, CSV, and XLSX into clean JSON. 
-Built for accountants, bookkeepers, and SaaS apps that need clean transaction data fast.
+Turn messy bank statements, receipts, and invoices into clean, structured transaction data in seconds.
+Built for accountants, bookkeepers, and SaaS apps that need accurate data without manual cleanup.
 
-## Features
-- Extract tables from PDFs using pdfplumber
-- Auto-detect date, vendor, amount columns
-- Normalize vendor names and categorize transactions
-- Handle negatives, currency symbols, and messy formats
-- 10MB file limit per request
+## What it does
+- Extracts tables from PDFs, CSVs, and XLSX files automatically
+- Handles scanned PDFs with built-in OCR fallback
+- Auto-detects date, vendor, amount, and description columns
+- Normalizes vendor names, currency symbols, and negative values
+- Returns both JSON and a confidence score so you know when to review
+- Processes files up to 10MB per request
 
 ## Endpoint
 `POST /cleanup`
-Upload a file with form-data key `file`.
+Send your file as `form-data` with the key `file`.
 
-## Example Response
-```json
+## Example Request
+```bash
+curl -X POST "https://your-domain.com/cleanup" \
+  -F "file=@statement.pdf"
 {
   "status": "success",
+  "method": "lattice",
+  "confidence": 0.96,
+  "count": 42,
   "transactions": [
     {
       "date": "2024-10-01",
@@ -26,6 +32,5 @@ Upload a file with form-data key `file`.
       "description": "AMAZON *12345",
       "amount": 49.99
     }
-  ],
-  "count": 1
+  ]
 }
