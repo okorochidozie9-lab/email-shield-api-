@@ -1,18 +1,57 @@
 // /api/check-email.js
-// Production-Grade Disposable Email Shield API
+// Enterprise-Grade Disposable Email Shield API
 
-const STATIC_BLOCKLIST = new Set([
+import { promises as dns } from 'dns';
+
+let DYNAMIC_BLOCKLIST = new Set();
+let BLOCKLIST_LAST_UPDATED = 0;
+const BLOCKLIST_URL = 'https://raw.githubusercontent.com/disposable/disposable-email-domains/master/disposable_email_blocklist.conf';
+const BLOCKLIST_TTL = 6 * 60 * 60 * 1000; // 6 hours
+
+const STATIC_FALLBACK = new Set([
   "10minutemail.com", "tempmail.org", "guerrillamail.com", "mailinator.com",
-  "sharklasers.com", "trashmail.com", "temp-mail.org", "yopmail.com",
-  "maildrop.cc", "dispostable.com", "getnada.com", "throwawaymail.com",
-  "fakemail.net", "mailnesia.com", "spamgourmet.com"
+  "sharklasers.com", "trashmail.com", "temp-mail.org", "yopmail.com"
 ]);
 
 const TRUSTED_TLDS = new Set(['com', 'net', 'org', 'io', 'co', 'app', 'dev', 'edu', 'gov', 'biz', 'info']);
 
-// In-memory rate limit store. Resets on cold start. Upgrade to Redis for real prod.
+// Note: For multi-instance accuracy at high scale, swap these in-memory stores for Upstash Redis.
 const rateLimitStore = new Map();
-const RATE_LIMIT = 100; // requests per minute per IP
+const mxCache = new Map(); // domain -> {hasMX, expiresAt}
+const mxCacheTTL = 60 * 60 * 1000; // 1 hour
+
+const stats = {
+  total_requests: 0,
+  blocked: 0,
+  allowed: 0,
+  avg_latency_ms: 0,
+  last_checks: [],
+  started_at: new Date().toISOString()
+};
+const RATE_LIMIT = 100;
+
+async function loadBlocklist() {
+  const now = Date.now();
+  if (DYNAMIC_BLOCKLIST.size > 0 && now - BLOCKLIST_LAST_UPDATED < BLOCKLIST_TTL) {
+    return DYNAMIC_BLOCKLIST;
+  }
+
+  try {
+    const res = await fetch(BLOCKLIST_URL);
+    if (!res.ok) throw new Error('Failed to fetch remote blocklist');
+    const text = await res.text();
+    const domains = text.split('\n')
+     .map(d => d.trim().toLowerCase())
+     .filter(d => d &&!d.startsWith('#'));
+
+    DYNAMIC_BLOCKLIST = new Set(domains);
+    BLOCKLIST_LAST_UPDATED = now;
+    return DYNAMIC_BLOCKLIST;
+  } catch (err) {
+    console.error('Blocklist sync failed. Using static protection layer:', err.message);
+    return DYNAMIC_BLOCKLIST.size > 0? DYNAMIC_BLOCKLIST : STATIC_FALLBACK;
+  }
+}
 
 function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -20,7 +59,6 @@ function isValidEmail(email) {
 
 function checkDomainMatch(domain, blocklist) {
   if (blocklist.has(domain)) return true;
-
   const parts = domain.split('.');
   if (parts.length > 2) {
     const rootDomain = parts.slice(-2).join('.');
@@ -29,95 +67,167 @@ function checkDomainMatch(domain, blocklist) {
   return false;
 }
 
-function checkRateLimit(ip) {
+async function checkMXRecord(domain) {
   const now = Date.now();
-  const windowStart = now - 60000; // 1 minute window
-
-  if (!rateLimitStore.has(ip)) {
-    rateLimitStore.set(ip, []);
+  const cached = mxCache.get(domain);
+  if (cached && cached.expiresAt > now) {
+    return cached.hasMX;
   }
 
-  let timestamps = rateLimitStore.get(ip);
-  timestamps = timestamps.filter(ts => ts > windowStart);
+  try {
+    const mxRecords = await Promise.race([
+      dns.resolveMx(domain),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2500))
+    ]);
+    const hasMX = mxRecords && mxRecords.length > 0;
+    mxCache.set(domain, { hasMX, expiresAt: now + mxCacheTTL });
+    return hasMX;
+  } catch {
+    mxCache.set(domain, { hasMX: false, expiresAt: now + mxCacheTTL });
+    return false;
+  }
+}
+
+function checkRateLimit(ip) {
+  const now = Date.now();
+  const windowStart = now - 60000;
+  if (!rateLimitStore.has(ip)) rateLimitStore.set(ip, []);
+
+  let timestamps = rateLimitStore.get(ip).filter(ts => ts > windowStart);
+  const remaining = RATE_LIMIT - timestamps.length;
 
   if (timestamps.length >= RATE_LIMIT) {
-    return false;
+    return { allowed: false, remaining: 0 };
   }
 
   timestamps.push(now);
   rateLimitStore.set(ip, timestamps);
-  return true;
+  return { allowed: true, remaining: Math.max(0, remaining - 1) };
+}
+
+function logCheck(email, domain, status, reason, latencyMs) {
+  stats.total_requests++;
+  if (status === 'block') stats.blocked++;
+  else stats.allowed++;
+
+  // Update rolling average latency
+  stats.avg_latency_ms = Math.round(
+    (stats.avg_latency_ms * (stats.total_requests - 1) + latencyMs) / stats.total_requests
+  );
+
+  stats.last_checks.unshift({
+    email: email.replace(/(.{2}).*(@.*)/, '$1***$2'),
+    domain,
+    status,
+    reason,
+    latency_ms: latencyMs,
+    time: new Date().toISOString()
+  });
+  if (stats.last_checks.length > 50) stats.last_checks.pop();
 }
 
 export default async function handler(req, res) {
-  // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
   res.setHeader('Cache-Control', 's-maxage=86400, stale-while-revalidate');
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+  if (req.method === 'OPTIONS') return res.status(200).end();
+
+  const { searchParams } = new URL(req.url, `http://${req.headers.host}`);
+  if (req.method === 'GET' && searchParams.get('stats') === 'true') {
+    const blockRate = stats.total_requests > 0? ((stats.blocked / stats.total_requests) * 100).toFixed(2) : 0;
+    return res.status(200).json({
+     ...stats,
+      block_rate_percent: parseFloat(blockRate),
+      blocklist_size: DYNAMIC_BLOCKLIST.size,
+      blocklist_updated_at: new Date(BLOCKLIST_LAST_UPDATED).toISOString(),
+      mx_cache_size: mxCache.size
+    });
   }
 
   if (req.method!== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed. Use POST.' });
+    return res.status(405).json({ error: 'Method not allowed. Use POST for checks.' });
   }
 
-  // Auth check
   const VALID_KEYS = new Set(process.env.API_KEYS?.split(',').filter(Boolean) || []);
   const apiKey = req.headers['x-api-key'];
-
   if (!apiKey ||!VALID_KEYS.has(apiKey)) {
-    return res.status(401).json({ error: 'Invalid or missing API key. Set x-api-key header.' });
+    return res.status(401).json({ error: 'Invalid or missing API key.' });
   }
 
-  // Rate limit check
   const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
-  if (!checkRateLimit(ip)) {
+  const rateCheck = checkRateLimit(ip);
+
+  res.setHeader('x-ratelimit-limit', RATE_LIMIT);
+  res.setHeader('x-ratelimit-remaining', rateCheck.remaining);
+
+  if (!rateCheck.allowed) {
     return res.status(429).json({ error: `Rate limit exceeded. Max ${RATE_LIMIT} req/min.` });
   }
 
+  const start = Date.now();
+
   try {
     const { email } = req.body;
-
     if (!email || typeof email!== 'string') {
-      return res.status(400).json({ error: 'Missing or invalid "email" field in request body.' });
+      return res.status(400).json({ error: 'Missing or invalid "email" field.' });
     }
 
     const cleanEmail = email.trim();
-
     if (!isValidEmail(cleanEmail)) {
+      const latency = Date.now() - start;
+      logCheck(cleanEmail, '', 'block', 'Invalid email format.', latency);
       return res.status(400).json({
         email: cleanEmail,
         valid: false,
         disposable: false,
-        reason: 'Invalid email format structural check failed.'
+        reason: 'Invalid email format.'
       });
     }
 
     const domain = cleanEmail.split('@')[1].toLowerCase();
-    const isDisposable = checkDomainMatch(domain, STATIC_BLOCKLIST);
+    const blocklist = await loadBlocklist();
+    const isDisposable = checkDomainMatch(domain, blocklist);
 
     const domainParts = domain.split('.');
     const primaryTld = domainParts[domainParts.length - 1];
     const isSuspiciousTLD =!TRUSTED_TLDS.has(primaryTld) && primaryTld.length > 4;
 
-    const actionStatus = isDisposable? 'block' : 'allow';
-    const decisionReason = isDisposable? 'Disposable email domain detected.' : 'OK';
+    const hasMX = await checkMXRecord(domain);
+    const noMX =!hasMX;
+
+    let status = 'allow';
+    let reason = 'OK';
+    let disposable = isDisposable;
+
+    if (isDisposable) {
+      status = 'block';
+      reason = 'Disposable email domain detected.';
+    } else if (noMX) {
+      status = 'block';
+      reason = 'Domain has no valid MX records.';
+      disposable = true;
+    }
+
+    const latency = Date.now() - start;
+    logCheck(cleanEmail, domain, status, reason, latency);
 
     return res.status(200).json({
       email: cleanEmail,
       domain,
       valid: true,
-      disposable: isDisposable,
+      disposable,
+      has_mx: hasMX,
       suspicious_tld: isSuspiciousTLD,
-      status: actionStatus,
-      reason: decisionReason,
+      status,
+      reason,
+      latency_ms: latency,
       timestamp: new Date().toISOString()
     });
 
   } catch (err) {
-    return res.status(500).json({ error: 'Internal server error', detail: err.message });
+    const latency = Date.now() - start;
+    return res.status(500).json({ error: 'Internal server error', detail: err.message, latency_ms: latency });
   }
 }
