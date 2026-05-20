@@ -1,7 +1,8 @@
 {
   "functions": {
     "api/check-email.js": {
-      "maxDuration": 5
+      "maxDuration": 10,
+      "runtime": "nodejs20.x"
     }
   }
 }
