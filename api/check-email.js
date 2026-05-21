@@ -41,8 +41,8 @@ async function loadBlocklist() {
     if (!res.ok) throw new Error('Failed to fetch remote blocklist');
     const text = await res.text();
     const domains = text.split('\n')
-     .map(d => d.trim().toLowerCase())
-     .filter(d => d &&!d.startsWith('#'));
+    .map(d => d.trim().toLowerCase())
+    .filter(d => d &&!d.startsWith('#'));
 
     DYNAMIC_BLOCKLIST = new Set(domains);
     BLOCKLIST_LAST_UPDATED = now;
@@ -138,7 +138,7 @@ export default async function handler(req, res) {
   if (req.method === 'GET' && searchParams.get('stats') === 'true') {
     const blockRate = stats.total_requests > 0? ((stats.blocked / stats.total_requests) * 100).toFixed(2) : 0;
     return res.status(200).json({
-     ...stats,
+    ...stats,
       block_rate_percent: parseFloat(blockRate),
       blocklist_size: DYNAMIC_BLOCKLIST.size,
       blocklist_updated_at: new Date(BLOCKLIST_LAST_UPDATED).toISOString(),
@@ -207,16 +207,17 @@ export default async function handler(req, res) {
     } else if (noMX) {
       status = 'block';
       reason = 'Domain has no valid MX records.';
-      disposable = true;
     }
 
     const latency = Date.now() - start;
     logCheck(cleanEmail, domain, status, reason, latency);
 
+    const isValid = status === 'allow'; // FIX #1: derive valid from status
+
     return res.status(200).json({
       email: cleanEmail,
       domain,
-      valid: true,
+      valid: isValid, // FIX #2: was hardcoded true
       disposable,
       has_mx: hasMX,
       suspicious_tld: isSuspiciousTLD,
