@@ -15,10 +15,11 @@ const STATIC_FALLBACK = new Set([
 
 const TRUSTED_TLDS = new Set(['com', 'net', 'org', 'io', 'co', 'app', 'dev', 'edu', 'gov', 'biz', 'info']);
 
-// Note: For multi-instance accuracy at high scale, swap these in-memory stores for Upstash Redis.
+// Bounded in-memory stores to prevent memory exhaustion leaks
 const rateLimitStore = new Map();
-const mxCache = new Map(); // domain -> {hasMX, expiresAt}
+const mxCache = new Map(); 
 const mxCacheTTL = 60 * 60 * 1000; // 1 hour
+const MAX_CACHE_SIZE = 5000; // Cap cache entries to protect memory boundaries
 
 const stats = {
   total_requests: 0,
@@ -41,15 +42,15 @@ async function loadBlocklist() {
     if (!res.ok) throw new Error('Failed to fetch remote blocklist');
     const text = await res.text();
     const domains = text.split('\n')
-    .map(d => d.trim().toLowerCase())
-    .filter(d => d &&!d.startsWith('#'));
+      .map(d => d.trim().toLowerCase())
+      .filter(d => d && !d.startsWith('#'));
 
     DYNAMIC_BLOCKLIST = new Set(domains);
     BLOCKLIST_LAST_UPDATED = now;
     return DYNAMIC_BLOCKLIST;
   } catch (err) {
     console.error('Blocklist sync failed. Using static protection layer:', err.message);
-    return DYNAMIC_BLOCKLIST.size > 0? DYNAMIC_BLOCKLIST : STATIC_FALLBACK;
+    return DYNAMIC_BLOCKLIST.size > 0 ? DYNAMIC_BLOCKLIST : STATIC_FALLBACK;
   }
 }
 
@@ -74,12 +75,18 @@ async function checkMXRecord(domain) {
     return cached.hasMX;
   }
 
+  // Evict items if memory optimization bounds are reached
+  if (mxCache.size >= MAX_CACHE_SIZE) {
+    const firstKey = mxCache.keys().next().value;
+    if (firstKey) mxCache.delete(firstKey);
+  }
+
   try {
     const mxRecords = await Promise.race([
       dns.resolveMx(domain),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2500))
     ]);
-    const hasMX = mxRecords && mxRecords.length > 0;
+    const hasMX = Array.isArray(mxRecords) && mxRecords.length > 0;
     mxCache.set(domain, { hasMX, expiresAt: now + mxCacheTTL });
     return hasMX;
   } catch {
@@ -91,6 +98,12 @@ async function checkMXRecord(domain) {
 function checkRateLimit(ip) {
   const now = Date.now();
   const windowStart = now - 60000;
+  
+  if (rateLimitStore.size >= MAX_CACHE_SIZE) {
+    const firstKey = rateLimitStore.keys().next().value;
+    if (firstKey) rateLimitStore.delete(firstKey);
+  }
+
   if (!rateLimitStore.has(ip)) rateLimitStore.set(ip, []);
 
   let timestamps = rateLimitStore.get(ip).filter(ts => ts > windowStart);
@@ -110,7 +123,6 @@ function logCheck(email, domain, status, reason, latencyMs) {
   if (status === 'block') stats.blocked++;
   else stats.allowed++;
 
-  // Update rolling average latency
   stats.avg_latency_ms = Math.round(
     (stats.avg_latency_ms * (stats.total_requests - 1) + latencyMs) / stats.total_requests
   );
@@ -130,15 +142,15 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
-  res.setHeader('Cache-Control', 's-maxage=86400, stale-while-revalidate');
+  res.setHeader('Cache-Control', 'no-store, max-age=0'); // Disabled shared cache proxying for processing safety
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const { searchParams } = new URL(req.url, `http://${req.headers.host}`);
+  const { searchParams } = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (req.method === 'GET' && searchParams.get('stats') === 'true') {
-    const blockRate = stats.total_requests > 0? ((stats.blocked / stats.total_requests) * 100).toFixed(2) : 0;
+    const blockRate = stats.total_requests > 0 ? ((stats.blocked / stats.total_requests) * 100).toFixed(2) : 0;
     return res.status(200).json({
-    ...stats,
+      ...stats,
       block_rate_percent: parseFloat(blockRate),
       blocklist_size: DYNAMIC_BLOCKLIST.size,
       blocklist_updated_at: new Date(BLOCKLIST_LAST_UPDATED).toISOString(),
@@ -146,17 +158,17 @@ export default async function handler(req, res) {
     });
   }
 
-  if (req.method!== 'POST') {
+  if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST for checks.' });
   }
 
   const VALID_KEYS = new Set(process.env.API_KEYS?.split(',').filter(Boolean) || []);
   const apiKey = req.headers['x-api-key'];
-  if (!apiKey ||!VALID_KEYS.has(apiKey)) {
+  if (!apiKey || !VALID_KEYS.has(apiKey)) {
     return res.status(401).json({ error: 'Invalid or missing API key.' });
   }
 
-  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+  const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
   const rateCheck = checkRateLimit(ip);
 
   res.setHeader('x-ratelimit-limit', RATE_LIMIT);
@@ -169,8 +181,13 @@ export default async function handler(req, res) {
   const start = Date.now();
 
   try {
+    // Robust payload verification to prevent internal engine crashes
+    if (!req.body || typeof req.body !== 'object') {
+      return res.status(400).json({ error: 'Invalid request body parsing payload format.' });
+    }
+
     const { email } = req.body;
-    if (!email || typeof email!== 'string') {
+    if (!email || typeof email !== 'string') {
       return res.status(400).json({ error: 'Missing or invalid "email" field.' });
     }
 
@@ -192,10 +209,10 @@ export default async function handler(req, res) {
 
     const domainParts = domain.split('.');
     const primaryTld = domainParts[domainParts.length - 1];
-    const isSuspiciousTLD =!TRUSTED_TLDS.has(primaryTld) && primaryTld.length > 4;
+    const isSuspiciousTLD = !TRUSTED_TLDS.has(primaryTld) && primaryTld.length > 4;
 
     const hasMX = await checkMXRecord(domain);
-    const noMX =!hasMX;
+    const noMX = !hasMX;
 
     let status = 'allow';
     let reason = 'OK';
@@ -212,12 +229,12 @@ export default async function handler(req, res) {
     const latency = Date.now() - start;
     logCheck(cleanEmail, domain, status, reason, latency);
 
-    const isValid = status === 'allow'; // FIX #1: derive valid from status
+    const isValid = status === 'allow';
 
     return res.status(200).json({
       email: cleanEmail,
       domain,
-      valid: isValid, // FIX #2: was hardcoded true
+      valid: isValid,
       disposable,
       has_mx: hasMX,
       suspicious_tld: isSuspiciousTLD,
