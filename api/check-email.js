@@ -1,5 +1,5 @@
 // /api/check-email.js
-// Enterprise-Grade Disposable Email Shield API
+// Optimized Enterprise-Grade Disposable Email Shield API V2
 
 import { promises as dns } from 'dns';
 
@@ -15,31 +15,31 @@ const STATIC_FALLBACK = new Set([
 
 const TRUSTED_TLDS = new Set(['com', 'net', 'org', 'io', 'co', 'app', 'dev', 'edu', 'gov', 'biz', 'info']);
 
-// Bounded in-memory stores to prevent memory exhaustion leaks
+// In-memory bounded layer for ephemeral execution caches
 const rateLimitStore = new Map();
 const mxCache = new Map(); 
 const mxCacheTTL = 60 * 60 * 1000; // 1 hour
-const MAX_CACHE_SIZE = 5000; // Cap cache entries to protect memory boundaries
+const MAX_CACHE_SIZE = 5000;
 
+// Internal process analytics trackers
 const stats = {
   total_requests: 0,
   blocked: 0,
   allowed: 0,
   avg_latency_ms: 0,
-  last_checks: [],
   started_at: new Date().toISOString()
 };
 const RATE_LIMIT = 100;
 
 async function loadBlocklist() {
   const now = Date.now();
-  if (DYNAMIC_BLOCKLIST.size > 0 && now - BLOCKLIST_LAST_UPDATED < BLOCKLIST_TTL) {
+  if (DYNAMIC_BLOCKLIST.size > 0 && (now - BLOCKLIST_LAST_UPDATED < BLOCKLIST_TTL)) {
     return DYNAMIC_BLOCKLIST;
   }
 
   try {
     const res = await fetch(BLOCKLIST_URL);
-    if (!res.ok) throw new Error('Failed to fetch remote blocklist');
+    if (!res.ok) throw new Error('Failed remote fetch sync');
     const text = await res.text();
     const domains = text.split('\n')
       .map(d => d.trim().toLowerCase())
@@ -49,7 +49,6 @@ async function loadBlocklist() {
     BLOCKLIST_LAST_UPDATED = now;
     return DYNAMIC_BLOCKLIST;
   } catch (err) {
-    console.error('Blocklist sync failed. Using static protection layer:', err.message);
     return DYNAMIC_BLOCKLIST.size > 0 ? DYNAMIC_BLOCKLIST : STATIC_FALLBACK;
   }
 }
@@ -75,7 +74,6 @@ async function checkMXRecord(domain) {
     return cached.hasMX;
   }
 
-  // Evict items if memory optimization bounds are reached
   if (mxCache.size >= MAX_CACHE_SIZE) {
     const firstKey = mxCache.keys().next().value;
     if (firstKey) mxCache.delete(firstKey);
@@ -84,14 +82,18 @@ async function checkMXRecord(domain) {
   try {
     const mxRecords = await Promise.race([
       dns.resolveMx(domain),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2500))
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 2000))
     ]);
     const hasMX = Array.isArray(mxRecords) && mxRecords.length > 0;
     mxCache.set(domain, { hasMX, expiresAt: now + mxCacheTTL });
     return hasMX;
-  } catch {
-    mxCache.set(domain, { hasMX: false, expiresAt: now + mxCacheTTL });
-    return false;
+  } catch (err) {
+    // If it's a structural failure code, assume no MX server exists. 
+    // If it's a server/timeout error, fail-safe open (return true) so we don't block legitimate users.
+    const isNoSuchDomain = ['ENOTFOUND', 'ENODATA'].includes(err.code);
+    const hasMX = !isNoSuchDomain; 
+    mxCache.set(domain, { hasMX, expiresAt: now + mxCacheTTL });
+    return hasMX;
   }
 }
 
@@ -106,48 +108,28 @@ function checkRateLimit(ip) {
 
   if (!rateLimitStore.has(ip)) rateLimitStore.set(ip, []);
 
-  let timestamps = rateLimitStore.get(ip).filter(ts => ts > windowStart);
-  const remaining = RATE_LIMIT - timestamps.length;
-
+  const timestamps = rateLimitStore.get(ip).filter(ts => ts > windowStart);
   if (timestamps.length >= RATE_LIMIT) {
     return { allowed: false, remaining: 0 };
   }
 
   timestamps.push(now);
   rateLimitStore.set(ip, timestamps);
-  return { allowed: true, remaining: Math.max(0, remaining - 1) };
-}
-
-function logCheck(email, domain, status, reason, latencyMs) {
-  stats.total_requests++;
-  if (status === 'block') stats.blocked++;
-  else stats.allowed++;
-
-  stats.avg_latency_ms = Math.round(
-    (stats.avg_latency_ms * (stats.total_requests - 1) + latencyMs) / stats.total_requests
-  );
-
-  stats.last_checks.unshift({
-    email: email.replace(/(.{2}).*(@.*)/, '$1***$2'),
-    domain,
-    status,
-    reason,
-    latency_ms: latencyMs,
-    time: new Date().toISOString()
-  });
-  if (stats.last_checks.length > 50) stats.last_checks.pop();
+  return { allowed: true, remaining: RATE_LIMIT - timestamps.length };
 }
 
 export default async function handler(req, res) {
+  // Setup standard CORS middleware parameters
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-api-key');
-  res.setHeader('Cache-Control', 'no-store, max-age=0'); // Disabled shared cache proxying for processing safety
+  res.setHeader('Cache-Control', 'no-store, max-age=0');
 
   if (req.method === 'OPTIONS') return res.status(200).end();
 
-  const { searchParams } = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-  if (req.method === 'GET' && searchParams.get('stats') === 'true') {
+  // Clean implementation query string evaluation for Vercel Serverless
+  const { query } = req;
+  if (req.method === 'GET' && query.stats === 'true') {
     const blockRate = stats.total_requests > 0 ? ((stats.blocked / stats.total_requests) * 100).toFixed(2) : 0;
     return res.status(200).json({
       ...stats,
@@ -159,13 +141,14 @@ export default async function handler(req, res) {
   }
 
   if (req.method !== 'POST') {
-    return res.status(405).json({ error: 'Method not allowed. Use POST for checks.' });
+    return res.status(405).json({ error: 'Method not allowed. Use POST for validation checks.' });
   }
 
+  // API Key Authentication layer check
   const VALID_KEYS = new Set(process.env.API_KEYS?.split(',').filter(Boolean) || []);
   const apiKey = req.headers['x-api-key'];
   if (!apiKey || !VALID_KEYS.has(apiKey)) {
-    return res.status(401).json({ error: 'Invalid or missing API key.' });
+    return res.status(401).json({ error: 'Invalid or missing API key verification credentials.' });
   }
 
   const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress || 'unknown';
@@ -175,67 +158,73 @@ export default async function handler(req, res) {
   res.setHeader('x-ratelimit-remaining', rateCheck.remaining);
 
   if (!rateCheck.allowed) {
-    return res.status(429).json({ error: `Rate limit exceeded. Max ${RATE_LIMIT} req/min.` });
+    return res.status(429).json({ error: `Too many requests. Limit ${RATE_LIMIT} req/min.` });
   }
 
   const start = Date.now();
 
   try {
-    // Robust payload verification to prevent internal engine crashes
-    if (!req.body || typeof req.body !== 'object') {
-      return res.status(400).json({ error: 'Invalid request body parsing payload format.' });
+    const body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    if (!body || typeof body !== 'object') {
+      return res.status(400).json({ error: 'Invalid payload structure execution formatting.' });
     }
 
-    const { email } = req.body;
+    const { email } = body;
     if (!email || typeof email !== 'string') {
-      return res.status(400).json({ error: 'Missing or invalid "email" field.' });
+      return res.status(400).json({ error: 'Missing standard string address parameter: "email"' });
     }
 
     const cleanEmail = email.trim();
     if (!isValidEmail(cleanEmail)) {
       const latency = Date.now() - start;
-      logCheck(cleanEmail, '', 'block', 'Invalid email format.', latency);
-      return res.status(400).json({
+      stats.total_requests++;
+      stats.blocked++;
+      return res.status(200).json({
         email: cleanEmail,
         valid: false,
         disposable: false,
-        reason: 'Invalid email format.'
+        status: 'block',
+        reason: 'Malformed syntax format structure evaluation fail.'
       });
     }
 
     const domain = cleanEmail.split('@')[1].toLowerCase();
     const blocklist = await loadBlocklist();
+    
     const isDisposable = checkDomainMatch(domain, blocklist);
-
     const domainParts = domain.split('.');
     const primaryTld = domainParts[domainParts.length - 1];
     const isSuspiciousTLD = !TRUSTED_TLDS.has(primaryTld) && primaryTld.length > 4;
 
-    const hasMX = await checkMXRecord(domain);
-    const noMX = !hasMX;
+    let hasMX = true;
+    if (!isDisposable) {
+      hasMX = await checkMXRecord(domain);
+    }
 
     let status = 'allow';
     let reason = 'OK';
-    let disposable = isDisposable;
 
     if (isDisposable) {
       status = 'block';
-      reason = 'Disposable email domain detected.';
-    } else if (noMX) {
+      reason = 'Disposable transactional delivery pattern intercepted.';
+    } else if (!hasMX) {
       status = 'block';
-      reason = 'Domain has no valid MX records.';
+      reason = 'Target routing location lacks configured active mailbox endpoints.';
     }
 
     const latency = Date.now() - start;
-    logCheck(cleanEmail, domain, status, reason, latency);
-
-    const isValid = status === 'allow';
+    
+    // Global metrics tracking calculation blocks
+    stats.total_requests++;
+    if (status === 'block') stats.blocked++;
+    else stats.allowed++;
+    stats.avg_latency_ms = Math.round(((stats.avg_latency_ms * (stats.total_requests - 1)) + latency) / stats.total_requests);
 
     return res.status(200).json({
       email: cleanEmail,
       domain,
-      valid: isValid,
-      disposable,
+      valid: status === 'allow',
+      disposable: isDisposable,
       has_mx: hasMX,
       suspicious_tld: isSuspiciousTLD,
       status,
@@ -246,6 +235,6 @@ export default async function handler(req, res) {
 
   } catch (err) {
     const latency = Date.now() - start;
-    return res.status(500).json({ error: 'Internal server error', detail: err.message, latency_ms: latency });
+    return res.status(500).json({ error: 'Internal system fault', processing_latency: latency });
   }
 }
