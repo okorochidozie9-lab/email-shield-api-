@@ -1,4 +1,4 @@
-Markdown# Disposable Email Shield API (V2)
+# Disposable Email Shield API (V2)
 
 A high-performance, serverless endpoint designed to block temporary emails, bot registrations, and fake signups at the gateway. Engineered specifically for seamless Vercel deployment with ultra-low execution latency.
 
@@ -38,13 +38,13 @@ Universally normalizes standard Vercel JSON objects and stringified raw formats 
 
 #### Required Headers
 
-```http
-Content-Type: application/json
-x-api-key: YOUR_CHURN_SHIELD_SECRET_KEY
-Request Body LayoutJSON{
+Request Body Layout
+{
   "email": "user@tempmail.org"
 }
-Response Payload Example (200 OK)JSON{
+
+Response Payload Example (200 OK)
+{
   "email": "user@tempmail.org",
   "domain": "tempmail.org",
   "valid": false,
@@ -56,7 +56,13 @@ Response Payload Example (200 OK)JSON{
   "latency_ms": 14,
   "timestamp": "2026-05-23T22:27:34.000Z"
 }
-2. Fetch Live Node Instance AnalyticsGET /api/check-email?stats=trueRetrieves localized server operational counters since the active instance thread container initial spin up cycle.Response Example (200 OK)JSON{
+2. Fetch Live Node Instance Analytics
+GET /api/check-email?stats=true
+
+Retrieves localized server operational counters since the active instance thread container initial spin up cycle.
+
+Response Example (200 OK)
+{
   "total_requests": 1420,
   "blocked": 310,
   "allowed": 1110,
@@ -67,7 +73,36 @@ Response Payload Example (200 OK)JSON{
   "blocklist_updated_at": "2026-05-23T21:45:12.000Z",
   "mx_cache_size": 842
 }
-Status and Error Handling MatrixStatus CodeDescription200 OKProcessing verification successfully evaluated (returns status: "allow" or status: "block").400 Bad RequestMissing explicit email parameter or incoming string fields format mismatch.401 UnauthorizedMissing or non-matching authentication signature parameter inside the x-api-key header slot.405 Method Not AllowedTriggering non-supported routes. Requires POST for account sweeps or GET for metric parameters.429 Too Many RequestsActive system user traffic exceeded instance ceiling threshold restrictions (100 requests / min).500 Internal FaultRuntime execution engine panic event loop handler crash protection fallback window.Rapid Deployment Strategy1. Configure Environment VariablesEnsure you add your target secrets parameter inside your Vercel platform environment dashboard configuration console panel setup:Code snippetAPI_KEYS=your_first_secret_key,your_second_secret_key
-2. Deploy to VercelExecute initialization deployment steps locally inside your workspace root:Bashvercel login
+Status and Error Handling Matrix
+
+200 OK - Processing verification successfully evaluated (returns status: "allow" or status: "block").
+
+400 Bad Request - Missing explicit email parameter or incoming string fields format mismatch.
+
+401 Unauthorized - Missing or non-matching authentication signature parameter inside the x-api-key header slot.
+
+405 Method Not Allowed - Triggering non-supported routes. Requires POST for account sweeps or GET for metric parameters.
+
+429 Too Many Requests - Active system user traffic exceeded instance ceiling threshold restrictions (100 requests / min).
+
+500 Internal Fault - Runtime execution engine panic event loop handler crash protection fallback window.
+
+Rapid Deployment Strategy
+1. Configure Environment Variables
+Ensure you add your target secrets parameter inside your Vercel platform environment dashboard configuration console panel setup:
+API_KEYS=your_first_secret_key,your_second_secret_key
+
+Deploy to Vercel
+Execute initialization deployment steps locally inside your workspace root:
+vercel login
 vercel
-LicenseMIT License. Created and maintained by the GetChurnShield team.
+
+License
+MIT License. Created and maintained by the GetChurnShield team.
+
+
+
+
+```http
+Content-Type: application/json
+x-api-key: YOUR_CHURN_SHIELD_SECRET_KEY
